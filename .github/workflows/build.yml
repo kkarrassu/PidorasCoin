@@ -1,6 +1,6 @@
 # One file is enough. Put this file in .github/workflows/build.yml.
 # Pidoras Coin 2.0 / offline / Android 8+ / 50-50
-name: Build PidorasCoin APK
+name: PidorasCoin 2.0 - Swedish APK
 
 on:
   workflow_dispatch:
@@ -1191,10 +1191,12 @@ jobs:
           path: ~/.android/debug.keystore
           key: pidorascoin-debug-signing-v2-${{ runner.os }}-${{ github.repository_id }}
 
-      - name: Install Android SDK packages
-        shell: bash
-        run: |
-          sdkmanager 'platforms;android-35' 'build-tools;34.0.0'
+      - name: Setup Android SDK and packages
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '12266719'
+          packages: 'platform-tools platforms;android-35 build-tools;34.0.0'
+          log-accepted-android-sdk-licenses: 'false'
 
       - name: Check JavaScript and toss recovery
         shell: bash
