@@ -1,1 +1,1248 @@
+# One file is enough. Put this file in .github/workflows/build.yml.
+# Pidoras Coin 2.0 / offline / Android 8+ / 50-50
+name: Build PidorasCoin APK
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pidorascoin-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Create complete Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .
+          cat > settings.gradle <<'COIN_SOURCE_000_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'PidorasCoin'
+          include ':app'
+          COIN_SOURCE_000_EOF
+          mkdir -p .
+          cat > build.gradle <<'COIN_SOURCE_001_EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          COIN_SOURCE_001_EOF
+          mkdir -p .
+          cat > gradle.properties <<'COIN_SOURCE_002_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          android.useAndroidX=false
+          COIN_SOURCE_002_EOF
+          mkdir -p app
+          cat > app/build.gradle <<'COIN_SOURCE_003_EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.pidorascoin.app'
+              compileSdk 35
+              buildToolsVersion '34.0.0'
+
+              defaultConfig {
+                  applicationId 'com.pidorascoin.app'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 20000 + (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+                  versionName '2.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              lint {
+                  abortOnError true
+                  checkReleaseBuilds true
+                  disable 'SetJavaScriptEnabled'
+              }
+          }
+          COIN_SOURCE_003_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'COIN_SOURCE_004_EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="false"
+                  android:theme="@style/AppTheme"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:label="Pidoras Coin"
+                  android:supportsRtl="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          COIN_SOURCE_004_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/app.js <<'COIN_SOURCE_005_EOF'
+          (function () {
+            'use strict';
+            const $ = id => document.getElementById(id);
+            const native = window.CoinNative;
+            const storageKey = 'pidoras-coin-v2';
+            let savingFailed = false;
+            const storage = {
+              load() { return native ? native.load() : localStorage.getItem(storageKey); },
+              save(value) {
+                try {
+                  const saved = native ? native.save(value) : (localStorage.setItem(storageKey, value), true);
+                  if (!saved) savingFailed = true;
+                  return saved;
+                } catch (_) { savingFailed = true; return false; }
+              }
+            };
+            function secureChoice() {
+              if (native) return native.choose();
+              // Exact bit split. No modulo bias and no Math.random fallback.
+              const bytes = new Uint8Array(1);
+              window.crypto.getRandomValues(bytes);
+              return (bytes[0] & 1) === 0 ? 'p' : 'i';
+            }
+            const engine = new CoinEngine(storage, secureChoice);
+            const coin = $('coin-spin');
+            const lift = $('coin-lift');
+            const shadow = $('shadow');
+            const scene = $('scene');
+            const toss = $('toss');
+            const coinButton = $('coin-button');
+            const overlay = $('history-overlay');
+            const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+            let busy = false;
+            let animations = [];
+            let finishTimer = 0;
+            let toastTimer = 0;
+            let previousFocus = null;
+            let restingSide = engine.state.last || 'p';
+
+            for (let z = -6; z <= 6; z++) {
+              const layer = document.createElement('span');
+              layer.className = 'edge-layer';
+              layer.style.transform = 'translateZ(' + z + 'px)';
+              coin.querySelector('.coin-edge').appendChild(layer);
+            }
+
+            function message(text) {
+              clearTimeout(toastTimer);
+              $('toast').textContent = text;
+              $('toast').classList.add('visible');
+              toastTimer = setTimeout(() => $('toast').classList.remove('visible'), 2200);
+            }
+
+            function haptic() {
+              if (!engine.state.haptics || !native || document.hidden) return;
+              try { native.haptic(); } catch (_) { /* Feedback never blocks a toss. */ }
+            }
+
+            function fullName(side) { return side === 'p' ? 'PIDORAS' : 'INTE PIDORAS'; }
+            function angle(side) { return side === 'i' ? 162 : -18; }
+            function pose(y, x, z) { return 'rotateX(' + x + 'deg) rotateY(' + y + 'deg) rotateZ(' + z + 'deg)'; }
+
+            function rest(side) {
+              restingSide = side || 'p';
+              coin.style.transform = pose(angle(restingSide), -13, -9);
+              lift.style.transform = 'translateY(0) scale(1)';
+              shadow.style.transform = 'translateX(-50%) scale(1)';
+              shadow.style.opacity = '.85';
+              scene.classList.toggle('is-silver', restingSide === 'i');
+            }
+
+            function renderRecent() {
+              const state = engine.state;
+              const total = state.p + state.i;
+              $('total-count').textContent = String(total).padStart(3, '0');
+              const target = $('recent-items');
+              target.textContent = '';
+              for (let n = 0; n < 7; n++) {
+                const item = state.recent[n];
+                const chip = document.createElement('span');
+                chip.className = 'history-chip';
+                if (item) {
+                  chip.textContent = item.side === 'p' ? 'P' : 'IP';
+                  chip.classList.toggle('silver', item.side === 'i');
+                  chip.classList.toggle('newest', n === 0);
+                  chip.setAttribute('aria-label', 'Kast ' + item.number + ': ' + fullName(item.side));
+                  chip.title = fullName(item.side);
+                } else {
+                  chip.textContent = '·';
+                  chip.classList.add('empty');
+                  chip.setAttribute('aria-hidden', 'true');
+                }
+                target.appendChild(chip);
+              }
+            }
+
+            function renderResult() {
+              const last = engine.state.last;
+              $('result-kicker').textContent = last ? 'RESULTAT' : 'REDO FÖR ETT KAST';
+              $('result-name').textContent = last ? fullName(last) : 'Din tur.';
+              $('result-name').className = 'result-name' + (last ? (last === 'p' ? ' gold' : ' silver') : '');
+              $('result-note').textContent = last ? 'Myntet har sagt sitt.' : 'Tryck på myntet eller knappen';
+              coinButton.setAttribute('aria-label', (last ? fullName(last) + '. ' : '') + 'Singla slant');
+            }
+
+            function render() {
+              renderResult();
+              renderRecent();
+              $('haptics').setAttribute('aria-pressed', String(engine.state.haptics));
+            }
+
+            function stopAnimations() {
+              const pending = animations;
+              animations = [];
+              pending.forEach(animation => {
+                animation.onfinish = null;
+                animation.cancel();
+              });
+              clearTimeout(finishTimer);
+            }
+
+            function settle(feedback) {
+              if (!busy) return;
+              busy = false;
+              const side = engine.finish() || engine.state.last || restingSide;
+              stopAnimations();
+              rest(side);
+              toss.disabled = false;
+              coinButton.disabled = false;
+              $('toss-label').textContent = 'EN GÅNG TILL';
+              render();
+              if (!overlay.hidden) renderHistory();
+              if (feedback && !reduceMotion.matches && $('landing-ring').animate) {
+                $('landing-ring').animate([
+                  {transform:'scale(.92)',opacity:.45},
+                  {transform:'scale(1.25)',opacity:0}
+                ], {duration:480,easing:'ease-out'});
+                $('result-name').animate([
+                  {transform:'translateY(6px)',opacity:0},
+                  {transform:'translateY(0)',opacity:1}
+                ], {duration:230,easing:'ease-out'});
+              }
+              if (feedback) haptic();
+              if (savingFailed) {
+                savingFailed = false;
+                message('Historiken kunde inte sparas. Kastet är klart.');
+              }
+            }
+
+            function flip() {
+              if (busy || !overlay.hidden) return;
+              let side;
+              try { side = engine.begin(); }
+              catch (_) { message('Det gick inte att slumpa fram ett resultat. Försök igen.'); return; }
+              if (!side) return;
+              busy = true;
+              toss.disabled = true;
+              coinButton.disabled = true;
+              $('toss-label').textContent = 'I LUFTEN';
+              $('result-kicker').textContent = 'MYNTET ÄR I LUFTEN';
+              $('result-name').className = 'result-name';
+              $('result-name').textContent = '…';
+              $('result-note').textContent = 'Snart är det avgjort.';
+              haptic();
+
+              if (reduceMotion.matches || !coin.animate) {
+                finishTimer = setTimeout(() => settle(true), 220);
+                return;
+              }
+
+              const duration = 1650;
+              const start = angle(restingSide);
+              const end = angle(side) + 1800;
+              try {
+                const spinning = coin.animate([
+                  {transform:pose(start,-13,-9)},
+                  {transform:pose(end, -13,-9)}
+                ], {duration,easing:'cubic-bezier(.14,.61,.18,1)',fill:'forwards'});
+                animations.push(spinning);
+                animations.push(lift.animate([
+                  {transform:'translateY(0) scale(1)',offset:0},
+                  {transform:'translateY(-36px) scale(.84)',offset:.3},
+                  {transform:'translateY(5px) scale(1.02)',offset:.82},
+                  {transform:'translateY(-3px) scale(.995)',offset:.92},
+                  {transform:'translateY(0) scale(1)',offset:1}
+                ], {duration,easing:'ease-in-out',fill:'forwards'}));
+                animations.push(shadow.animate([
+                  {transform:'translateX(-50%) scale(1)',opacity:.85,offset:0},
+                  {transform:'translateX(-50%) scale(.6)',opacity:.35,offset:.3},
+                  {transform:'translateX(-50%) scale(1.1)',opacity:.9,offset:.82},
+                  {transform:'translateX(-50%) scale(1)',opacity:.85,offset:1}
+                ], {duration,easing:'ease-in-out',fill:'forwards'}));
+                spinning.onfinish = () => settle(true);
+                spinning.oncancel = () => { if (busy) settle(false); };
+                finishTimer = setTimeout(() => settle(true), duration + 200);
+              } catch (_) {
+                // An animation failure still delivers and saves the already selected result.
+                settle(false);
+              }
+            }
+
+            function renderHistory() {
+              const state = engine.state;
+              const total = state.p + state.i;
+              $('count-p').textContent = state.p.toLocaleString('sv-SE');
+              $('count-i').textContent = state.i.toLocaleString('sv-SE');
+              $('percent-p').textContent = total ? (100 * state.p / total).toLocaleString('sv-SE', {minimumFractionDigits:1,maximumFractionDigits:1}) + ' % av kasten' : 'Inga kast än';
+              $('percent-i').textContent = total ? (100 * state.i / total).toLocaleString('sv-SE', {minimumFractionDigits:1,maximumFractionDigits:1}) + ' % av kasten' : 'Inga kast än';
+              $('clear-history').disabled = busy || !total;
+              const list = $('history-list');
+              list.textContent = '';
+              if (!state.recent.length) {
+                const empty = document.createElement('p');
+                empty.className = 'history-empty';
+                empty.textContent = 'Allt börjar med det första kastet.';
+                list.appendChild(empty);
+                return;
+              }
+              state.recent.forEach(item => {
+                const row = document.createElement('div');
+                row.className = 'history-row';
+                const number = document.createElement('span');
+                number.className = 'history-number';
+                number.textContent = '#' + item.number;
+                const name = document.createElement('span');
+                name.className = 'history-side' + (item.side === 'i' ? ' silver' : '');
+                name.textContent = fullName(item.side);
+                const time = document.createElement('span');
+                time.className = 'history-time';
+                time.textContent = new Date(item.at).toLocaleString('sv-SE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+                row.appendChild(number);
+                row.appendChild(name);
+                row.appendChild(time);
+                list.appendChild(row);
+              });
+            }
+
+            function openHistory() {
+              if (!overlay.hidden) return;
+              previousFocus = document.activeElement;
+              renderHistory();
+              $('clear-confirm').hidden = true;
+              $('clear-history').hidden = false;
+              overlay.hidden = false;
+              document.body.classList.add('modal-open');
+              $('app').setAttribute('aria-hidden', 'true');
+              $('app').inert = true;
+              $('close-history').focus();
+              if (!reduceMotion.matches && $('history-sheet').animate) {
+                $('history-sheet').animate([{transform:'translateY(45px)',opacity:.6},{transform:'translateY(0)',opacity:1}], {duration:220,easing:'ease-out'});
+              }
+            }
+
+            function closeHistory() {
+              if (overlay.hidden) return false;
+              overlay.hidden = true;
+              document.body.classList.remove('modal-open');
+              $('app').removeAttribute('aria-hidden');
+              $('app').inert = false;
+              if (previousFocus && previousFocus.focus) previousFocus.focus();
+              return true;
+            }
+
+            toss.addEventListener('click', flip);
+            coinButton.addEventListener('click', flip);
+            $('haptics').addEventListener('click', () => {
+              engine.setHaptics(!engine.state.haptics);
+              $('haptics').setAttribute('aria-pressed', String(engine.state.haptics));
+              haptic();
+              message(engine.state.haptics ? 'Vibration på' : 'Vibration av');
+            });
+            $('open-history').addEventListener('click', openHistory);
+            $('close-history').addEventListener('click', closeHistory);
+            overlay.addEventListener('click', event => { if (event.target === overlay) closeHistory(); });
+            $('clear-history').addEventListener('click', () => {
+              $('clear-confirm').hidden = false;
+              $('clear-history').hidden = true;
+              $('cancel-clear').focus();
+            });
+            $('cancel-clear').addEventListener('click', () => {
+              $('clear-confirm').hidden = true;
+              $('clear-history').hidden = false;
+              $('clear-history').focus();
+            });
+            $('confirm-clear').addEventListener('click', () => {
+              if (!engine.clear()) return;
+              $('clear-confirm').hidden = true;
+              $('clear-history').hidden = false;
+              $('toss-label').textContent = 'SINGLA SLANT';
+              rest('p');
+              render();
+              renderHistory();
+              $('close-history').focus();
+              message('Historiken är rensad');
+            });
+            document.addEventListener('keydown', event => {
+              if (event.key === 'Escape' && !overlay.hidden) { event.preventDefault(); closeHistory(); }
+              if (event.key === 'Tab' && !overlay.hidden) {
+                const candidates = Array.from($('history-sheet').querySelectorAll('button:not(:disabled)'))
+                  .filter(button => button.getClientRects().length);
+                const first = candidates[0], last = candidates[candidates.length - 1];
+                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+              }
+            });
+            document.addEventListener('visibilitychange', () => { if (document.hidden) settle(false); });
+            window.addEventListener('pagehide', () => settle(false));
+            window.coinApp = {pause: () => settle(false), back: closeHistory};
+            rest(restingSide);
+            render();
+            if (engine.state.last) $('toss-label').textContent = 'EN GÅNG TILL';
+          })();
+          COIN_SOURCE_005_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/back.svg <<'COIN_SOURCE_006_EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 256 256" width="256" height="256">
+            <defs>
+              <linearGradient id="smetal" x1="10%" y1="8%" x2="90%" y2="96%">
+                <stop offset="0" stop-color="#dfe7ec"/><stop offset=".17" stop-color="#78858d"/><stop offset=".38" stop-color="#f3f5f6"/><stop offset=".58" stop-color="#a2b1bb"/><stop offset=".8" stop-color="#4c5864"/><stop offset="1" stop-color="#d2dce3"/>
+              </linearGradient>
+              <linearGradient id="sface" x1="12%" y1="0" x2="82%" y2="100%">
+                <stop stop-color="#f3f5f6"/><stop offset=".43" stop-color="#a2b1bb"/><stop offset=".68" stop-color="#d2dce3"/><stop offset="1" stop-color="#78858d"/>
+              </linearGradient>
+              <radialGradient id="slight" cx="30%" cy="18%" r="84%"><stop stop-color="#ffffff" stop-opacity=".27"/><stop offset=".55" stop-color="#ffffff" stop-opacity="0"/><stop offset="1" stop-color="#000000" stop-opacity=".18"/></radialGradient>
+              <pattern id="sgrain" width="3" height="3" patternUnits="userSpaceOnUse"><path d="M0,1 H3" stroke="#34414b" stroke-opacity=".055" stroke-width=".45"/></pattern>
+              <path id="sarc" d="M41,129 A87,87 0 0,1 215,129"/>
+            </defs>
+            <circle cx="128" cy="128" r="127.3" fill="url(#smetal)" stroke="#4c5864" stroke-width="1.2"/>
+            <circle cx="128" cy="128" r="124.5" fill="none" stroke="#ffffff" stroke-opacity=".7" stroke-width="1.1"/>
+            <g stroke="#34414b" stroke-width="1.15" stroke-opacity=".7"><path d="M128.00,8.00 L128.00,14.50"/><path d="M134.28,8.16 L134.04,12.66"/><path d="M140.54,8.66 L140.07,13.13"/><path d="M146.77,9.48 L146.07,13.92"/><path d="M152.95,10.62 L152.01,15.02"/><path d="M159.06,12.09 L157.38,18.37"/><path d="M165.08,13.87 L163.69,18.15"/><path d="M171.00,15.97 L169.39,20.17"/><path d="M176.81,18.37 L174.98,22.49"/><path d="M182.48,21.08 L180.44,25.09"/><path d="M188.00,24.08 L184.75,29.71"/><path d="M193.36,27.36 L190.91,31.13"/><path d="M198.53,30.92 L195.89,34.56"/><path d="M203.52,34.74 L200.69,38.24"/><path d="M208.30,38.82 L205.28,42.17"/><path d="M212.85,43.15 L208.26,47.74"/><path d="M217.18,47.70 L213.83,50.72"/><path d="M221.26,52.48 L217.76,55.31"/><path d="M225.08,57.47 L221.44,60.11"/><path d="M228.64,62.64 L224.87,65.09"/><path d="M231.92,68.00 L226.29,71.25"/><path d="M234.92,73.52 L230.91,75.56"/><path d="M237.63,79.19 L233.51,81.02"/><path d="M240.03,85.00 L235.83,86.61"/><path d="M242.13,90.92 L237.85,92.31"/><path d="M243.91,96.94 L237.63,98.62"/><path d="M245.38,103.05 L240.98,103.99"/><path d="M246.52,109.23 L242.08,109.93"/><path d="M247.34,115.46 L242.87,115.93"/><path d="M247.84,121.72 L243.34,121.96"/><path d="M248.00,128.00 L241.50,128.00"/><path d="M247.84,134.28 L243.34,134.04"/><path d="M247.34,140.54 L242.87,140.07"/><path d="M246.52,146.77 L242.08,146.07"/><path d="M245.38,152.95 L240.98,152.01"/><path d="M243.91,159.06 L237.63,157.38"/><path d="M242.13,165.08 L237.85,163.69"/><path d="M240.03,171.00 L235.83,169.39"/><path d="M237.63,176.81 L233.51,174.98"/><path d="M234.92,182.48 L230.91,180.44"/><path d="M231.92,188.00 L226.29,184.75"/><path d="M228.64,193.36 L224.87,190.91"/><path d="M225.08,198.53 L221.44,195.89"/><path d="M221.26,203.52 L217.76,200.69"/><path d="M217.18,208.30 L213.83,205.28"/><path d="M212.85,212.85 L208.26,208.26"/><path d="M208.30,217.18 L205.28,213.83"/><path d="M203.52,221.26 L200.69,217.76"/><path d="M198.53,225.08 L195.89,221.44"/><path d="M193.36,228.64 L190.91,224.87"/><path d="M188.00,231.92 L184.75,226.29"/><path d="M182.48,234.92 L180.44,230.91"/><path d="M176.81,237.63 L174.98,233.51"/><path d="M171.00,240.03 L169.39,235.83"/><path d="M165.08,242.13 L163.69,237.85"/><path d="M159.06,243.91 L157.38,237.63"/><path d="M152.95,245.38 L152.01,240.98"/><path d="M146.77,246.52 L146.07,242.08"/><path d="M140.54,247.34 L140.07,242.87"/><path d="M134.28,247.84 L134.04,243.34"/><path d="M128.00,248.00 L128.00,241.50"/><path d="M121.72,247.84 L121.96,243.34"/><path d="M115.46,247.34 L115.93,242.87"/><path d="M109.23,246.52 L109.93,242.08"/><path d="M103.05,245.38 L103.99,240.98"/><path d="M96.94,243.91 L98.62,237.63"/><path d="M90.92,242.13 L92.31,237.85"/><path d="M85.00,240.03 L86.61,235.83"/><path d="M79.19,237.63 L81.02,233.51"/><path d="M73.52,234.92 L75.56,230.91"/><path d="M68.00,231.92 L71.25,226.29"/><path d="M62.64,228.64 L65.09,224.87"/><path d="M57.47,225.08 L60.11,221.44"/><path d="M52.48,221.26 L55.31,217.76"/><path d="M47.70,217.18 L50.72,213.83"/><path d="M43.15,212.85 L47.74,208.26"/><path d="M38.82,208.30 L42.17,205.28"/><path d="M34.74,203.52 L38.24,200.69"/><path d="M30.92,198.53 L34.56,195.89"/><path d="M27.36,193.36 L31.13,190.91"/><path d="M24.08,188.00 L29.71,184.75"/><path d="M21.08,182.48 L25.09,180.44"/><path d="M18.37,176.81 L22.49,174.98"/><path d="M15.97,171.00 L20.17,169.39"/><path d="M13.87,165.08 L18.15,163.69"/><path d="M12.09,159.06 L18.37,157.38"/><path d="M10.62,152.95 L15.02,152.01"/><path d="M9.48,146.77 L13.92,146.07"/><path d="M8.66,140.54 L13.13,140.07"/><path d="M8.16,134.28 L12.66,134.04"/><path d="M8.00,128.00 L14.50,128.00"/><path d="M8.16,121.72 L12.66,121.96"/><path d="M8.66,115.46 L13.13,115.93"/><path d="M9.48,109.23 L13.92,109.93"/><path d="M10.62,103.05 L15.02,103.99"/><path d="M12.09,96.94 L18.37,98.62"/><path d="M13.87,90.92 L18.15,92.31"/><path d="M15.97,85.00 L20.17,86.61"/><path d="M18.37,79.19 L22.49,81.02"/><path d="M21.08,73.52 L25.09,75.56"/><path d="M24.08,68.00 L29.71,71.25"/><path d="M27.36,62.64 L31.13,65.09"/><path d="M30.92,57.47 L34.56,60.11"/><path d="M34.74,52.48 L38.24,55.31"/><path d="M38.82,47.70 L42.17,50.72"/><path d="M43.15,43.15 L47.74,47.74"/><path d="M47.70,38.82 L50.72,42.17"/><path d="M52.48,34.74 L55.31,38.24"/><path d="M57.47,30.92 L60.11,34.56"/><path d="M62.64,27.36 L65.09,31.13"/><path d="M68.00,24.08 L71.25,29.71"/><path d="M73.52,21.08 L75.56,25.09"/><path d="M79.19,18.37 L81.02,22.49"/><path d="M85.00,15.97 L86.61,20.17"/><path d="M90.92,13.87 L92.31,18.15"/><path d="M96.94,12.09 L98.62,18.37"/><path d="M103.05,10.62 L103.99,15.02"/><path d="M109.23,9.48 L109.93,13.92"/><path d="M115.46,8.66 L115.93,13.13"/><path d="M121.72,8.16 L121.96,12.66"/></g>
+            <circle cx="128" cy="128" r="109" fill="url(#sface)" stroke="#34414b" stroke-width="1.1"/>
+            <circle cx="128" cy="128" r="107.1" fill="none" stroke="#ffffff" stroke-opacity=".65" stroke-width=".8"/>
+            <circle cx="128" cy="128" r="104.6" fill="none" stroke="#34414b" stroke-opacity=".38" stroke-width=".55"/>
+            <circle cx="128" cy="128" r="49" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="52" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="55" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="58" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="61" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="64" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="67" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="70" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="73" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="76" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="79" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="82" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="85" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="88" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="91" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="94" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="97" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="100" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="103" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width=".35"/>
+            <circle cx="128" cy="128" r="104.5" fill="url(#sgrain)"/>
+            <text fill="#34414b" text-anchor="middle" font-family="Arial,sans-serif" font-size="8.6" letter-spacing="2" font-weight="600"><textPath xlink:href="#sarc" startOffset="50%">LÅT MYNTET AVGÖRA</textPath></text>
+            <g font-family="Arial,sans-serif" text-anchor="middle" fill="#ffffff" opacity=".4" transform="translate(0,1.1)"><path d="M128,67 L131,78 L142,81 L131,84 L128,95 L125,84 L114,81 L125,78 Z"/><text x="128" y="133" font-size="28" letter-spacing="5" font-weight="800">INTE</text><text x="128" y="165" font-size="29" letter-spacing="1" font-weight="900">PIDORAS</text></g>
+            <g font-family="Arial,sans-serif" text-anchor="middle" fill="#34414b"><path d="M128,67 L131,78 L142,81 L131,84 L128,95 L125,84 L114,81 L125,78 Z"/><text x="128" y="133" font-size="28" letter-spacing="5" font-weight="800">INTE</text><text x="128" y="165" font-size="29" letter-spacing="1" font-weight="900">PIDORAS</text></g>
+            <path d="M92,179 H164" stroke="#34414b" stroke-opacity=".6" stroke-width=".7"/>
+            <text x="128" y="198" text-anchor="middle" font-family="Arial,sans-serif" font-size="10" letter-spacing="3" font-weight="600" fill="#34414b">50 / 50</text>
+            <g fill="#34414b"><path d="M54,101 l2,5 5,2 -5,2 -2,5 -2,-5 -5,-2 5,-2Z"/><path d="M202,101 l2,5 5,2 -5,2 -2,5 -2,-5 -5,-2 5,-2Z"/></g>
+            <circle cx="128" cy="128" r="126" fill="url(#slight)"/>
+          </svg>
+          COIN_SOURCE_006_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/engine.js <<'COIN_SOURCE_007_EOF'
+          (function (scope) {
+            'use strict';
+            const valid = side => side === 'p' || side === 'i';
+            const integer = n => Number.isSafeInteger(n) && n >= 0;
+            const blank = () => ({version: 2, p: 0, i: 0, recent: [], last: null, pending: null, haptics: true});
+
+            class CoinEngine {
+              constructor(storage, choose, now) {
+                this.storage = storage;
+                this.choose = choose;
+                this.now = now || Date.now;
+                this.state = blank();
+                try {
+                  const raw = storage.load();
+                  const s = raw ? JSON.parse(raw) : null;
+                  if (s && s.version === 2 && integer(s.p) && integer(s.i) && integer(s.p + s.i)) {
+                    this.state.p = s.p;
+                    this.state.i = s.i;
+                    this.state.haptics = s.haptics !== false;
+                    this.state.last = valid(s.last) ? s.last : null;
+                    this.state.recent = Array.isArray(s.recent) ? s.recent.filter(r =>
+                      r && valid(r.side) && integer(r.at) && integer(r.number)
+                    ).slice(0, 50) : [];
+                    this.state.pending = s.pending && valid(s.pending.side) && integer(s.pending.at)
+                      ? {side: s.pending.side, at: s.pending.at} : null;
+                  }
+                } catch (_) { /* A damaged save starts with a clean local history. */ }
+                if (this.state.pending) this.finish();
+              }
+
+              persist() {
+                try { return this.storage.save(JSON.stringify(this.state)) !== false; }
+                catch (_) { return false; }
+              }
+
+              begin() {
+                if (this.state.pending) return null;
+                const side = this.choose();
+                if (!valid(side)) throw new Error('Secure random source unavailable');
+                this.state.pending = {side, at: this.now()};
+                this.persist();
+                return side;
+              }
+
+              finish() {
+                const item = this.state.pending;
+                if (!item) return null;
+                this.state[item.side]++;
+                this.state.last = item.side;
+                this.state.recent.unshift({side: item.side, at: item.at, number: this.state.p + this.state.i});
+                this.state.recent = this.state.recent.slice(0, 50);
+                this.state.pending = null;
+                this.persist();
+                return item.side;
+              }
+
+              setHaptics(enabled) {
+                this.state.haptics = !!enabled;
+                this.persist();
+              }
+
+              clear() {
+                if (this.state.pending) return false;
+                const haptics = this.state.haptics;
+                this.state = blank();
+                this.state.haptics = haptics;
+                this.persist();
+                return true;
+              }
+            }
+            if (typeof module !== 'undefined' && module.exports) module.exports = CoinEngine;
+            else scope.CoinEngine = CoinEngine;
+          })(typeof window === 'undefined' ? globalThis : window);
+          COIN_SOURCE_007_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/front.svg <<'COIN_SOURCE_008_EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 256 256" width="256" height="256">
+            <defs>
+              <linearGradient id="gmetal" x1="10%" y1="8%" x2="90%" y2="96%">
+                <stop offset="0" stop-color="#fff1ba"/><stop offset=".17" stop-color="#ad772b"/><stop offset=".38" stop-color="#f6d993"/><stop offset=".58" stop-color="#c4974d"/><stop offset=".8" stop-color="#6b491e"/><stop offset="1" stop-color="#ecd2a0"/>
+              </linearGradient>
+              <linearGradient id="gface" x1="12%" y1="0" x2="82%" y2="100%">
+                <stop stop-color="#f6d993"/><stop offset=".43" stop-color="#c4974d"/><stop offset=".68" stop-color="#ecd2a0"/><stop offset="1" stop-color="#ad772b"/>
+              </linearGradient>
+              <radialGradient id="glight" cx="30%" cy="18%" r="84%"><stop stop-color="#ffffff" stop-opacity=".27"/><stop offset=".55" stop-color="#ffffff" stop-opacity="0"/><stop offset="1" stop-color="#000000" stop-opacity=".18"/></radialGradient>
+              <pattern id="ggrain" width="3" height="3" patternUnits="userSpaceOnUse"><path d="M0,1 H3" stroke="#60431e" stroke-opacity=".055" stroke-width=".45"/></pattern>
+              <path id="garc" d="M41,129 A87,87 0 0,1 215,129"/>
+            </defs>
+            <circle cx="128" cy="128" r="127.3" fill="url(#gmetal)" stroke="#6b491e" stroke-width="1.2"/>
+            <circle cx="128" cy="128" r="124.5" fill="none" stroke="#fff1b7" stroke-opacity=".7" stroke-width="1.1"/>
+            <g stroke="#60431e" stroke-width="1.15" stroke-opacity=".7"><path d="M128.00,8.00 L128.00,14.50"/><path d="M134.28,8.16 L134.04,12.66"/><path d="M140.54,8.66 L140.07,13.13"/><path d="M146.77,9.48 L146.07,13.92"/><path d="M152.95,10.62 L152.01,15.02"/><path d="M159.06,12.09 L157.38,18.37"/><path d="M165.08,13.87 L163.69,18.15"/><path d="M171.00,15.97 L169.39,20.17"/><path d="M176.81,18.37 L174.98,22.49"/><path d="M182.48,21.08 L180.44,25.09"/><path d="M188.00,24.08 L184.75,29.71"/><path d="M193.36,27.36 L190.91,31.13"/><path d="M198.53,30.92 L195.89,34.56"/><path d="M203.52,34.74 L200.69,38.24"/><path d="M208.30,38.82 L205.28,42.17"/><path d="M212.85,43.15 L208.26,47.74"/><path d="M217.18,47.70 L213.83,50.72"/><path d="M221.26,52.48 L217.76,55.31"/><path d="M225.08,57.47 L221.44,60.11"/><path d="M228.64,62.64 L224.87,65.09"/><path d="M231.92,68.00 L226.29,71.25"/><path d="M234.92,73.52 L230.91,75.56"/><path d="M237.63,79.19 L233.51,81.02"/><path d="M240.03,85.00 L235.83,86.61"/><path d="M242.13,90.92 L237.85,92.31"/><path d="M243.91,96.94 L237.63,98.62"/><path d="M245.38,103.05 L240.98,103.99"/><path d="M246.52,109.23 L242.08,109.93"/><path d="M247.34,115.46 L242.87,115.93"/><path d="M247.84,121.72 L243.34,121.96"/><path d="M248.00,128.00 L241.50,128.00"/><path d="M247.84,134.28 L243.34,134.04"/><path d="M247.34,140.54 L242.87,140.07"/><path d="M246.52,146.77 L242.08,146.07"/><path d="M245.38,152.95 L240.98,152.01"/><path d="M243.91,159.06 L237.63,157.38"/><path d="M242.13,165.08 L237.85,163.69"/><path d="M240.03,171.00 L235.83,169.39"/><path d="M237.63,176.81 L233.51,174.98"/><path d="M234.92,182.48 L230.91,180.44"/><path d="M231.92,188.00 L226.29,184.75"/><path d="M228.64,193.36 L224.87,190.91"/><path d="M225.08,198.53 L221.44,195.89"/><path d="M221.26,203.52 L217.76,200.69"/><path d="M217.18,208.30 L213.83,205.28"/><path d="M212.85,212.85 L208.26,208.26"/><path d="M208.30,217.18 L205.28,213.83"/><path d="M203.52,221.26 L200.69,217.76"/><path d="M198.53,225.08 L195.89,221.44"/><path d="M193.36,228.64 L190.91,224.87"/><path d="M188.00,231.92 L184.75,226.29"/><path d="M182.48,234.92 L180.44,230.91"/><path d="M176.81,237.63 L174.98,233.51"/><path d="M171.00,240.03 L169.39,235.83"/><path d="M165.08,242.13 L163.69,237.85"/><path d="M159.06,243.91 L157.38,237.63"/><path d="M152.95,245.38 L152.01,240.98"/><path d="M146.77,246.52 L146.07,242.08"/><path d="M140.54,247.34 L140.07,242.87"/><path d="M134.28,247.84 L134.04,243.34"/><path d="M128.00,248.00 L128.00,241.50"/><path d="M121.72,247.84 L121.96,243.34"/><path d="M115.46,247.34 L115.93,242.87"/><path d="M109.23,246.52 L109.93,242.08"/><path d="M103.05,245.38 L103.99,240.98"/><path d="M96.94,243.91 L98.62,237.63"/><path d="M90.92,242.13 L92.31,237.85"/><path d="M85.00,240.03 L86.61,235.83"/><path d="M79.19,237.63 L81.02,233.51"/><path d="M73.52,234.92 L75.56,230.91"/><path d="M68.00,231.92 L71.25,226.29"/><path d="M62.64,228.64 L65.09,224.87"/><path d="M57.47,225.08 L60.11,221.44"/><path d="M52.48,221.26 L55.31,217.76"/><path d="M47.70,217.18 L50.72,213.83"/><path d="M43.15,212.85 L47.74,208.26"/><path d="M38.82,208.30 L42.17,205.28"/><path d="M34.74,203.52 L38.24,200.69"/><path d="M30.92,198.53 L34.56,195.89"/><path d="M27.36,193.36 L31.13,190.91"/><path d="M24.08,188.00 L29.71,184.75"/><path d="M21.08,182.48 L25.09,180.44"/><path d="M18.37,176.81 L22.49,174.98"/><path d="M15.97,171.00 L20.17,169.39"/><path d="M13.87,165.08 L18.15,163.69"/><path d="M12.09,159.06 L18.37,157.38"/><path d="M10.62,152.95 L15.02,152.01"/><path d="M9.48,146.77 L13.92,146.07"/><path d="M8.66,140.54 L13.13,140.07"/><path d="M8.16,134.28 L12.66,134.04"/><path d="M8.00,128.00 L14.50,128.00"/><path d="M8.16,121.72 L12.66,121.96"/><path d="M8.66,115.46 L13.13,115.93"/><path d="M9.48,109.23 L13.92,109.93"/><path d="M10.62,103.05 L15.02,103.99"/><path d="M12.09,96.94 L18.37,98.62"/><path d="M13.87,90.92 L18.15,92.31"/><path d="M15.97,85.00 L20.17,86.61"/><path d="M18.37,79.19 L22.49,81.02"/><path d="M21.08,73.52 L25.09,75.56"/><path d="M24.08,68.00 L29.71,71.25"/><path d="M27.36,62.64 L31.13,65.09"/><path d="M30.92,57.47 L34.56,60.11"/><path d="M34.74,52.48 L38.24,55.31"/><path d="M38.82,47.70 L42.17,50.72"/><path d="M43.15,43.15 L47.74,47.74"/><path d="M47.70,38.82 L50.72,42.17"/><path d="M52.48,34.74 L55.31,38.24"/><path d="M57.47,30.92 L60.11,34.56"/><path d="M62.64,27.36 L65.09,31.13"/><path d="M68.00,24.08 L71.25,29.71"/><path d="M73.52,21.08 L75.56,25.09"/><path d="M79.19,18.37 L81.02,22.49"/><path d="M85.00,15.97 L86.61,20.17"/><path d="M90.92,13.87 L92.31,18.15"/><path d="M96.94,12.09 L98.62,18.37"/><path d="M103.05,10.62 L103.99,15.02"/><path d="M109.23,9.48 L109.93,13.92"/><path d="M115.46,8.66 L115.93,13.13"/><path d="M121.72,8.16 L121.96,12.66"/></g>
+            <circle cx="128" cy="128" r="109" fill="url(#gface)" stroke="#60431e" stroke-width="1.1"/>
+            <circle cx="128" cy="128" r="107.1" fill="none" stroke="#fff1b7" stroke-opacity=".65" stroke-width=".8"/>
+            <circle cx="128" cy="128" r="104.6" fill="none" stroke="#60431e" stroke-opacity=".38" stroke-width=".55"/>
+            <circle cx="128" cy="128" r="49" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="52" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="55" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="58" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="61" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="64" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="67" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="70" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="73" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="76" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="79" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="82" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="85" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="88" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="91" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="94" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="97" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="100" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/><circle cx="128" cy="128" r="103" fill="none" stroke="#fff1b7" stroke-opacity=".08" stroke-width=".35"/>
+            <circle cx="128" cy="128" r="104.5" fill="url(#ggrain)"/>
+            <text fill="#60431e" text-anchor="middle" font-family="Arial,sans-serif" font-size="8.6" letter-spacing="2" font-weight="600"><textPath xlink:href="#garc" startOffset="50%">LÅT MYNTET AVGÖRA</textPath></text>
+            <g font-family="Arial,sans-serif" text-anchor="middle" fill="#fff1b7" opacity=".4" transform="translate(0,1.1)"><path d="M113,70 H134 C158,70 158,111 134,111 H126 V132 H113 Z M126,82 V99 H134 C143,99 143,82 134,82 Z" fill-rule="evenodd"/><text x="128" y="166" font-size="29" letter-spacing="1" font-weight="900">PIDORAS</text></g>
+            <g font-family="Arial,sans-serif" text-anchor="middle" fill="#60431e"><path d="M113,70 H134 C158,70 158,111 134,111 H126 V132 H113 Z M126,82 V99 H134 C143,99 143,82 134,82 Z" fill-rule="evenodd"/><text x="128" y="166" font-size="29" letter-spacing="1" font-weight="900">PIDORAS</text></g>
+            <path d="M92,179 H164" stroke="#60431e" stroke-opacity=".6" stroke-width=".7"/>
+            <text x="128" y="198" text-anchor="middle" font-family="Arial,sans-serif" font-size="10" letter-spacing="3" font-weight="600" fill="#60431e">50 / 50</text>
+            <g fill="#60431e"><path d="M54,101 l2,5 5,2 -5,2 -2,5 -2,-5 -5,-2 5,-2Z"/><path d="M202,101 l2,5 5,2 -5,2 -2,5 -2,-5 -5,-2 5,-2Z"/></g>
+            <circle cx="128" cy="128" r="126" fill="url(#glight)"/>
+          </svg>
+          COIN_SOURCE_008_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/index.html <<'COIN_SOURCE_009_EOF'
+          <!doctype html>
+          <html lang="sv">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+            <meta name="theme-color" content="#101112">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+            <title>Pidoras Coin</title>
+            <link rel="stylesheet" href="style.css">
+            <script defer src="engine.js"></script>
+            <script defer src="app.js"></script>
+          </head>
+          <body>
+            <div class="ambient" aria-hidden="true"></div>
+            <div class="app" id="app">
+              <header class="header">
+                <div class="brand">
+                  <svg class="brand-mark" viewBox="0 0 36 36" aria-hidden="true"><circle cx="18" cy="18" r="16"/><circle cx="18" cy="18" r="12.5"/><path d="M14 25V11h5a4 4 0 010 8h-5m0-5h4.5a1 1 0 010 2H14"/></svg>
+                  <div class="brand-name">PIDORAS<span>MYNTKLUBBEN</span></div>
+                </div>
+                <div class="header-actions">
+                  <button class="icon-button" id="haptics" type="button" aria-label="Vibration" aria-pressed="true" title="Vibration">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="4" width="8" height="16" rx="2"/><path d="M5 8v8M2 10v4m17-6v8m3-6v4"/><path class="haptic-slash" d="M3 3l18 18"/></svg>
+                  </button>
+                  <button class="icon-button" id="open-history" type="button" aria-label="Öppna historiken" title="Historik">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 119 10M3 5v6h6m3-4v5l3 2"/></svg>
+                  </button>
+                </div>
+              </header>
+
+              <main>
+                <div class="intro">
+                  <p class="eyebrow"><span></span> 50 / 50</p>
+                  <h1>Låt myntet<br><span>avgöra.</span></h1>
+                  <div class="edition" aria-hidden="true">TVÅ UTFALL.<br>ETT KAST.</div>
+                </div>
+
+                <div class="scene" id="scene">
+                  <div class="scene-halo" aria-hidden="true"></div>
+                  <div class="orbit orbit-one" aria-hidden="true"></div>
+                  <div class="orbit orbit-two" aria-hidden="true"></div>
+                  <span class="scene-cross cross-one" aria-hidden="true">+</span>
+                  <span class="scene-cross cross-two" aria-hidden="true">+</span>
+                  <span class="side-label side-label-left" aria-hidden="true">01 / P</span>
+                  <span class="side-label side-label-right" aria-hidden="true">02 / IP</span>
+                  <div class="coin-shadow" id="shadow" aria-hidden="true"></div>
+                  <button class="coin-touch" id="coin-button" type="button" aria-label="Singla slant">
+                    <span class="coin-lift" id="coin-lift">
+                      <span class="coin-spin" id="coin-spin">
+                        <span class="coin-edge" aria-hidden="true"></span>
+                        <span class="coin-face coin-front"><img src="front.svg" width="256" height="256" alt="PIDORAS" draggable="false"></span>
+                        <span class="coin-face coin-back"><img src="back.svg" width="256" height="256" alt="INTE PIDORAS" draggable="false"></span>
+                      </span>
+                    </span>
+                  </button>
+                  <div class="landing-ring" id="landing-ring" aria-hidden="true"></div>
+                </div>
+
+                <section class="result" aria-live="polite" aria-atomic="true">
+                  <div class="result-kicker" id="result-kicker">REDO FÖR ETT KAST</div>
+                  <div class="result-name" id="result-name">Din tur.</div>
+                  <p class="result-note" id="result-note">Tryck på myntet eller knappen</p>
+                </section>
+              </main>
+
+              <footer class="dock">
+                <section class="recent" aria-label="Senaste kasten">
+                  <div class="recent-heading"><span>SENASTE KASTEN</span><span id="total-count">000</span></div>
+                  <div class="recent-items" id="recent-items"></div>
+                </section>
+                <button class="toss-button" id="toss" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="16" rx="7" ry="3.5"/><path d="M12 11V3m-3 3 3-3 3 3M5 16v3c0 2 14 2 14 0v-3"/></svg>
+                  <span id="toss-label">SINGLA SLANT</span>
+                  <span class="button-dot" aria-hidden="true"></span>
+                </button>
+                <div class="fairness"><span class="gold-dot"></span>50% PIDORAS <span class="fairness-divider">/</span> 50% INTE PIDORAS</div>
+              </footer>
+            </div>
+
+            <div class="sheet-overlay" id="history-overlay" hidden>
+              <section class="sheet" id="history-sheet" role="dialog" aria-modal="true" aria-labelledby="history-title" tabindex="-1">
+                <div class="sheet-handle" aria-hidden="true"></div>
+                <div class="sheet-heading"><div><p class="eyebrow">SÅ FÖLL MYNTET</p><h2 id="history-title">Tidigare kast</h2></div>
+                  <button class="icon-button" id="close-history" type="button" aria-label="Stäng historiken"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
+                </div>
+                <div class="stats">
+                  <div class="stat"><span class="stat-label">PIDORAS</span><strong id="count-p">0</strong><span id="percent-p">—</span></div>
+                  <div class="stat silver"><span class="stat-label">INTE PIDORAS</span><strong id="count-i">0</strong><span id="percent-i">—</span></div>
+                </div>
+                <p class="history-explainer">Det här är dina resultat. Chansen är alltid 50/50 vid nästa kast.</p>
+                <div class="history-list" id="history-list"></div>
+                <div class="clear-confirm" id="clear-confirm" hidden>
+                  <span>Rensa hela historiken och nollställa räknarna?</span>
+                  <div><button id="cancel-clear" type="button">Behåll</button><button class="danger" id="confirm-clear" type="button">Radera</button></div>
+                </div>
+                <button class="clear-button" id="clear-history" type="button">Rensa historiken</button>
+              </section>
+            </div>
+            <div class="toast" id="toast" role="status" aria-live="polite"></div>
+          </body>
+          </html>
+          COIN_SOURCE_009_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/style.css <<'COIN_SOURCE_010_EOF'
+          :root{color-scheme:dark;--bg:#101112;--surface:#191a1b;--gold:#e2c185;--muted:#8b8984;--text:#f3f0e9;--silver:#c9d2dc;--coin:250px}
+          *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+          html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:Arial,Roboto,sans-serif}
+          body{overflow-x:hidden;-webkit-font-smoothing:antialiased}
+          button{font:inherit;touch-action:manipulation;cursor:pointer;-webkit-user-select:none;user-select:none}
+          button:focus-visible{outline:2px solid var(--gold);outline-offset:5px}
+          button:disabled{cursor:default}
+          [hidden]{display:none!important}
+          .ambient{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;background:radial-gradient(ellipse at 50% 37%,#9b71300e,transparent 58%)}
+          .app{position:relative;width:100%;max-width:470px;min-height:100vh;margin:auto;padding:24px 26px 17px;display:flex;flex-direction:column}
+          .header{display:flex;align-items:center;justify-content:space-between;min-height:44px}
+          .brand{display:flex;align-items:center;gap:10px}
+          .brand-mark{height:34px;width:34px;fill:none;stroke:var(--gold);stroke-width:1.1}
+          .brand-name{font-size:12px;font-weight:800;letter-spacing:2.5px;line-height:1.6}
+          .brand-name span{display:block;font-size:8px;letter-spacing:3.1px;color:var(--muted);font-weight:500}
+          .header-actions{display:flex;gap:4px}
+          .icon-button{width:44px;height:44px;border:1px solid #ffffff0b;border-radius:50%;background:#ffffff03;color:#a7a49c;display:flex;align-items:center;justify-content:center;transition:color .2s,background .2s}
+          .icon-button svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.45;stroke-linecap:round;stroke-linejoin:round}
+          .icon-button:active{background:#ffffff12}
+          #haptics[aria-pressed=true]{color:var(--gold)}
+          .haptic-slash{display:none}
+          #haptics[aria-pressed=false] .haptic-slash{display:block}
+          main{display:flex;flex-direction:column;flex:1}
+          .intro{position:relative;margin-top:30px}
+          .eyebrow{display:flex;align-items:center;gap:9px;margin:0 0 14px;font-size:9px;letter-spacing:2.1px;font-weight:600;color:var(--gold)}
+          .eyebrow>span{width:17px;height:1px;background:var(--gold)}
+          h1{font-size:39px;font-weight:800;line-height:1.06;letter-spacing:-1.6px;margin:0}
+          h1>span{color:var(--gold)}
+          .edition{position:absolute;right:0;bottom:5px;color:#77766f;font-size:8px;line-height:1.8;letter-spacing:1.1px;text-align:right}
+          .scene{position:relative;min-height:255px;flex:1;perspective:1000px;isolation:isolate}
+          .scene-halo{position:absolute;left:50%;top:49%;width:330px;height:280px;transform:translate(-50%,-50%);background:radial-gradient(ellipse,#bb8a3c15,transparent 65%);pointer-events:none;transition:background .4s}
+          .scene.is-silver .scene-halo{background:radial-gradient(ellipse,#a1b5ca16,transparent 65%)}
+          .orbit{position:absolute;top:54%;left:50%;width:330px;height:112px;border:1px solid #c7ad7920;border-radius:50%;transform:translate(-50%,-50%) rotate(-24deg);pointer-events:none}
+          .orbit-two{width:350px;height:138px;transform:translate(-50%,-50%) rotate(28deg);border-color:#c7ad7910}
+          .scene-cross{position:absolute;font-weight:300;font-size:16px;color:#b9a07066}
+          .cross-one{left:4%;top:27%}.cross-two{right:0;top:77%}
+          .side-label{position:absolute;top:57%;font-size:8px;letter-spacing:1.5px;color:#777268}
+          .side-label-left{left:0}.side-label-right{right:0}
+          .coin-touch{position:absolute;left:50%;top:46%;width:var(--coin);height:var(--coin);transform:translate(-50%,-50%);background:none;padding:0;border:0;border-radius:50%;perspective:1000px;overflow:visible;color:inherit}
+          .coin-lift{display:block;position:relative;width:100%;height:100%;transform-style:preserve-3d;transform:translateY(0)}
+          .coin-spin{display:block;position:relative;width:100%;height:100%;transform-style:preserve-3d;transform:rotateX(-13deg) rotateY(-18deg) rotateZ(-9deg)}
+          .coin-face,.coin-edge,.edge-layer{display:block;position:absolute;top:0;left:0;width:100%;height:100%;border-radius:50%;transform-style:preserve-3d}
+          .coin-face{-webkit-backface-visibility:hidden;backface-visibility:hidden;overflow:hidden;outline:1px solid transparent}
+          .coin-face img{width:100%;height:100%;display:block;pointer-events:none}
+          .coin-front{transform:translateZ(7px)}
+          .coin-back{transform:rotateY(180deg) translateZ(7px)}
+          .edge-layer{background:linear-gradient(135deg,#f6d796 5%,#9f7438 24%,#e4bb74 38%,#674817 63%,#e2be76 88%,#b18d4c);border:1px solid #6e4c23}
+          .edge-layer:nth-child(2n){border-color:#dbb679}
+          .coin-shadow{position:absolute;left:50%;bottom:3%;width:185px;height:24px;transform:translateX(-50%);border-radius:50%;background:radial-gradient(ellipse,#000b,transparent 69%);opacity:.85;pointer-events:none}
+          .landing-ring{position:absolute;left:50%;top:48%;height:var(--coin);width:var(--coin);margin-left:calc(var(--coin) / -2);margin-top:calc(var(--coin) / -2);border:1px solid #e2c18580;border-radius:50%;opacity:0;pointer-events:none}
+          .result{text-align:center;min-height:82px;margin-top:2px}
+          .result-kicker{font-size:8px;color:var(--muted);font-weight:600;letter-spacing:2.2px;min-height:10px}
+          .result-name{font-size:30px;letter-spacing:-.8px;line-height:1.25;margin-top:7px;font-weight:800;min-height:38px;overflow-wrap:anywhere}
+          .result-name.gold{color:var(--gold)}.result-name.silver{color:var(--silver)}
+          .result-note{font-size:10px;letter-spacing:.2px;color:var(--muted);margin:7px 0 0}
+          .dock{margin-top:23px}
+          .recent{border-top:1px solid #ffffff12;padding-top:14px;margin-bottom:18px}
+          .recent-heading{display:flex;justify-content:space-between;align-items:center;font-size:8px;color:var(--muted);letter-spacing:1.6px}
+          #total-count{font-variant-numeric:tabular-nums;color:#b9b5aa}
+          .recent-items{display:flex;gap:7px;margin-top:11px;min-height:32px}
+          .history-chip{position:relative;display:flex;align-items:center;justify-content:center;flex:1;max-width:46px;height:32px;border-radius:8px;background:#e2c1850c;border:1px solid #e2c18528;color:var(--gold);font-size:10px;font-weight:700;letter-spacing:.6px}
+          .history-chip.silver{background:#c9d2dc09;border-color:#c9d2dc23;color:var(--silver)}
+          .history-chip.newest::after{position:absolute;content:"";bottom:3px;width:3px;height:3px;border-radius:50%;background:currentColor}
+          .history-chip.empty{color:#44443f;border:1px dashed #ffffff0e;background:none;font-size:13px;font-weight:400}
+          .toss-button{position:relative;display:flex;width:100%;min-height:59px;align-items:center;justify-content:center;gap:12px;border:1px solid #ffe3a06b;border-radius:15px;background:linear-gradient(112deg,#eed5a3,#daba7f 60%,#cda968);color:#2e271c;box-shadow:0 5px 24px #bb843310,inset 0 1px #fff4c94d;transition:transform .15s,filter .2s}
+          .toss-button:active{transform:scale(.98)}
+          .toss-button:disabled{filter:saturate(.55);opacity:.72}
+          .toss-button svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+          #toss-label{font-size:12px;font-weight:800;letter-spacing:1.8px}
+          .button-dot{position:absolute;right:20px;height:5px;width:5px;border-radius:50%;background:#806337}
+          .fairness{display:flex;align-items:center;justify-content:center;gap:6px;font-size:7.4px;letter-spacing:.5px;color:#aaa498;margin-top:14px}
+          .gold-dot{width:4px;height:4px;border-radius:50%;background:var(--gold);margin-right:2px}
+          .fairness-divider{color:#58564f;margin:0 5px}
+          .sheet-overlay{position:fixed;top:0;left:0;width:100%;height:100%;z-index:20;background:#0009;display:flex;align-items:flex-end;justify-content:center;padding-top:25px}
+          .sheet{width:100%;max-width:470px;max-height:94vh;overflow-y:auto;background:#191a1b;border:1px solid #ffffff12;border-bottom:0;border-radius:26px 26px 0 0;padding:10px 24px 24px;box-shadow:0 -15px 80px #0006;overscroll-behavior:contain}
+          .sheet-handle{height:4px;width:32px;background:#4c4c47;border-radius:3px;margin:0 auto 23px}
+          .sheet-heading{display:flex;align-items:center;justify-content:space-between}
+          .sheet-heading .eyebrow{font-size:8px;letter-spacing:1.7px;margin-bottom:9px}
+          h2{font-size:25px;letter-spacing:-.7px;line-height:1.2;margin:0;font-weight:700}
+          .stats{display:flex;border:1px solid #ffffff12;border-radius:16px;padding:19px;margin-top:25px}
+          .stat{display:flex;flex-direction:column;flex:1;color:var(--gold);gap:8px}
+          .stat+.stat{border-left:1px solid #ffffff12;padding-left:22px}
+          .stat.silver{color:var(--silver)}
+          .stat-label{font-size:8px;letter-spacing:1.2px}
+          .stat strong{font-size:36px;line-height:1;letter-spacing:-1px;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+          .stat>span:last-child{font-size:10px;color:var(--muted)}
+          .history-explainer{font-size:10px;line-height:1.6;color:var(--muted);margin:13px 0 20px;max-width:300px}
+          .history-list{max-height:34vh;overflow-y:auto}
+          .history-row{display:flex;align-items:center;gap:12px;padding:13px 0;border-top:1px solid #ffffff0a;font-size:11px}
+          .history-number{color:#8b8984;min-width:31px;font-size:9px;font-variant-numeric:tabular-nums}
+          .history-side{color:var(--gold);font-size:11px;font-weight:600;flex:1}
+          .history-side.silver{color:var(--silver)}
+          .history-time{color:var(--muted);font-size:9px;font-variant-numeric:tabular-nums}
+          .history-empty{padding:25px 0;text-align:center;color:#aaa498;font-size:12px;line-height:1.7}
+          .clear-button{display:block;border:0;background:transparent;color:#b8a99b;margin:20px auto 0;min-height:44px;padding:10px;font-size:11px}
+          .clear-button:disabled{color:#5c5b56}
+          .clear-confirm{margin-top:20px;padding:15px;border:1px solid #dec19629;border-radius:14px;color:#cfc8be;font-size:12px;line-height:1.6}
+          .clear-confirm>div{display:flex;justify-content:flex-end;gap:6px;margin-top:12px}
+          .clear-confirm button{background:#ffffff08;color:var(--text);min-height:44px;border:1px solid #ffffff0d;border-radius:9px;padding:8px 17px;font-size:12px}
+          .clear-confirm .danger{color:#e3b8a6}
+          .toast{position:fixed;left:50%;bottom:25px;max-width:85%;transform:translate(-50%,15px);padding:12px 18px;z-index:30;color:var(--text);background:#2a2926;border:1px solid #e2c18526;border-radius:12px;font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;text-align:center;box-shadow:0 8px 24px #0005}
+          .toast.visible{opacity:1;transform:translate(-50%,0)}
+          body.modal-open{overflow:hidden}
+          @media(min-height:850px){:root{--coin:265px}.scene{min-height:300px}.intro{margin-top:40px}.dock{margin-top:28px}.app{padding-top:30px;padding-bottom:22px}}
+          @media(max-height:840px){:root{--coin:222px}.app{padding-top:17px;padding-bottom:13px}.intro{margin-top:22px}h1{font-size:35px}.scene{min-height:220px}.dock{margin-top:15px}.recent{margin-bottom:14px;padding-top:12px}.result{min-height:74px}.orbit{width:300px}.orbit-two{width:315px}}
+          @media(max-height:760px){:root{--coin:208px}.app{padding-top:14px;padding-bottom:12px}.intro{margin-top:18px}h1{font-size:32px}.scene{min-height:208px}.result-name{font-size:28px;min-height:35px}.dock{margin-top:12px}.recent{padding-top:10px;margin-bottom:12px}.recent-items{margin-top:9px}.toss-button{min-height:56px}.fairness{margin-top:10px}.orbit{width:278px}.orbit-two{width:294px}}
+          @media(max-height:670px){:root{--coin:176px}.app{padding-top:12px}.intro{margin-top:12px}.eyebrow{margin-bottom:10px}h1{font-size:28px;letter-spacing:-1px}h1 br{display:none}h1 span::before{content:' '}.edition{display:none}.scene{min-height:180px}.result-name{font-size:25px;min-height:31px}.result{min-height:68px}.dock{margin-top:10px}.toss-button{min-height:50px}.recent{padding-top:9px;margin-bottom:10px}.recent-items{margin-top:8px}.history-chip{height:28px}.recent-items{min-height:28px}.fairness{margin-top:9px}.orbit{width:248px}.orbit-two{width:267px}}
+          @media(max-width:355px){.app{padding-left:20px;padding-right:20px}.edition{font-size:7px}.fairness{font-size:6.9px}.recent-items{gap:5px}.side-label{font-size:7px}.sheet{padding-left:20px;padding-right:20px}}
+          @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
+          COIN_SOURCE_010_EOF
+          mkdir -p app/src/main/java/com/pidorascoin/app
+          cat > app/src/main/java/com/pidorascoin/app/MainActivity.java <<'COIN_SOURCE_011_EOF'
+          package com.pidorascoin.app;
+
+          import android.app.Activity;
+          import android.graphics.Color;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.DisplayCutout;
+          import android.view.HapticFeedbackConstants;
+          import android.view.View;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+          import java.io.ByteArrayInputStream;
+          import java.security.SecureRandom;
+
+          /** One trusted, bundled screen. No network or vibration permissions required. */
+          public final class MainActivity extends Activity {
+              private static final String ASSETS = "file:///android_asset/";
+              private static final String PAGE = ASSETS + "index.html";
+              private WebView web;
+              private final SecureRandom random = new SecureRandom();
+
+              @Override
+              @SuppressWarnings("deprecation")
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  Window window = getWindow();
+                  window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+                  window.setStatusBarColor(Color.TRANSPARENT);
+                  window.setNavigationBarColor(Color.TRANSPARENT);
+                  window.getDecorView().setSystemUiVisibility(
+                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      window.setStatusBarContrastEnforced(false);
+                      window.setNavigationBarContrastEnforced(false);
+                  }
+
+                  FrameLayout root = new FrameLayout(this);
+                  root.setBackgroundColor(Color.rgb(16, 17, 18));
+                  root.setOnApplyWindowInsetsListener((view, insets) -> {
+                      int left = insets.getSystemWindowInsetLeft();
+                      int top = insets.getSystemWindowInsetTop();
+                      int right = insets.getSystemWindowInsetRight();
+                      int bottom = insets.getSystemWindowInsetBottom();
+                      if (Build.VERSION.SDK_INT >= 28) {
+                          DisplayCutout cutout = insets.getDisplayCutout();
+                          if (cutout != null) {
+                              left = Math.max(left, cutout.getSafeInsetLeft());
+                              top = Math.max(top, cutout.getSafeInsetTop());
+                              right = Math.max(right, cutout.getSafeInsetRight());
+                              bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                          }
+                      }
+                      view.setPadding(left, top, right, bottom);
+                      return insets;
+                  });
+
+                  web = new WebView(this);
+                  web.setBackgroundColor(Color.rgb(16, 17, 18));
+                  web.setOverScrollMode(View.OVER_SCROLL_NEVER);
+                  web.setVerticalScrollBarEnabled(false);
+                  WebSettings settings = web.getSettings();
+                  settings.setJavaScriptEnabled(true); // Only our bundled, non-navigable document.
+                  settings.setDomStorageEnabled(true);
+                  settings.setAllowFileAccess(false); // android_asset remains accessible.
+                  settings.setAllowContentAccess(false);
+                  settings.setAllowFileAccessFromFileURLs(false);
+                  settings.setAllowUniversalAccessFromFileURLs(false);
+                  settings.setBlockNetworkLoads(true);
+                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+                  settings.setJavaScriptCanOpenWindowsAutomatically(false);
+                  settings.setSupportMultipleWindows(false);
+                  web.addJavascriptInterface(new CoinBridge(), "CoinNative");
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          return true;
+                      }
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                          return true;
+                      }
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          if (request.getUrl().toString().startsWith(ASSETS)) return null;
+                          return new WebResourceResponse("text/plain", "UTF-8", new ByteArrayInputStream(new byte[0]));
+                      }
+                  });
+                  root.addView(web, new FrameLayout.LayoutParams(-1, -1));
+                  setContentView(root);
+                  root.requestApplyInsets();
+                  web.loadUrl(PAGE);
+              }
+
+              private final class CoinBridge {
+                  @JavascriptInterface
+                  public String choose() {
+                      return random.nextBoolean() ? "p" : "i";
+                  }
+
+                  @JavascriptInterface
+                  public void haptic() {
+                      runOnUiThread(() -> {
+                          if (web != null && web.hasWindowFocus()) {
+                              web.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public String load() {
+                      return getSharedPreferences("coin_v2", MODE_PRIVATE).getString("state", "");
+                  }
+
+                  @JavascriptInterface
+                  public boolean save(String json) {
+                      if (json == null || json.length() > 32768) return false;
+                      // Called on the bridge worker, not the UI thread. Persist before animating.
+                      return getSharedPreferences("coin_v2", MODE_PRIVATE).edit().putString("state", json).commit();
+                  }
+
+                  @JavascriptInterface
+                  public void close() {
+                      runOnUiThread(() -> finish());
+                  }
+              }
+
+              @Override
+              protected void onPause() {
+                  if (web != null) {
+                      web.evaluateJavascript("window.coinApp && window.coinApp.pause()", null);
+                      web.onPause();
+                  }
+                  super.onPause();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  if (web != null) web.onResume();
+              }
+
+              @Override
+              @SuppressWarnings("deprecation")
+              public void onBackPressed() {
+                  if (web == null) { super.onBackPressed(); return; }
+                  web.evaluateJavascript("window.coinApp ? window.coinApp.back() : false", closed -> {
+                      if (!"true".equals(closed)) finish();
+                  });
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (web != null) {
+                      web.removeJavascriptInterface("CoinNative");
+                      web.destroy();
+                      web = null;
+                  }
+                  super.onDestroy();
+              }
+          }
+          COIN_SOURCE_011_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_coin.xml <<'COIN_SOURCE_012_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#E2C185" android:pathData="M54,22 A32,32 0,1 1,54,86 A32,32 0,1 1,54,22" />
+              <path android:fillColor="#101112" android:pathData="M54,25 A29,29 0,1 1,54,83 A29,29 0,1 1,54,25" />
+              <path android:fillColor="#E2C185" android:pathData="M54,28 A26,26 0,1 1,54,80 A26,26 0,1 1,54,28" />
+              <path android:fillColor="#302716" android:pathData="M44,37 L57,37 C72,37 72,60 57,60 L51,60 L51,72 L44,72 Z M51,44 L51,53 L57,53 C63,53 63,44 57,44 Z" />
+          </vector>
+          COIN_SOURCE_012_EOF
+          mkdir -p app/src/main/res/mipmap-anydpi
+          cat > app/src/main/res/mipmap-anydpi/ic_launcher.xml <<'COIN_SOURCE_013_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#101112" android:pathData="M0,0 H108 V108 H0 Z" />
+              <path android:fillColor="#E2C185" android:pathData="M54,14 A40,40 0,1 1,54,94 A40,40 0,1 1,54,14" />
+              <path android:fillColor="#101112" android:pathData="M54,18 A36,36 0,1 1,54,90 A36,36 0,1 1,54,18" />
+              <path android:fillColor="#E2C185" android:pathData="M54,21 A33,33 0,1 1,54,87 A33,33 0,1 1,54,21" />
+              <path android:fillColor="#302716" android:pathData="M43,35 L58,35 C76,35 76,62 58,62 L51,62 L51,75 L43,75 Z M51,43 L51,54 L58,54 C65,54 65,43 58,43 Z" />
+          </vector>
+          COIN_SOURCE_013_EOF
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'COIN_SOURCE_014_EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/icon_background" />
+              <foreground android:drawable="@drawable/ic_coin" />
+          </adaptive-icon>
+          COIN_SOURCE_014_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/styles.xml <<'COIN_SOURCE_015_EOF'
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#101112</item>
+                  <item name="android:navigationBarColor">#101112</item>
+                  <item name="android:windowBackground">#101112</item>
+                  <item name="android:colorAccent">#E2C185</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+              <color name="icon_background">#101112</color>
+          </resources>
+          COIN_SOURCE_015_EOF
+          mkdir -p tests
+          cat > tests/engine.test.cjs <<'COIN_SOURCE_016_EOF'
+          'use strict';
+          const assert = require('node:assert/strict');
+          const test = require('node:test');
+          const CoinEngine = require('../app/src/main/assets/engine.js');
+          function memory(value = '') { return {value, load() { return this.value; }, save(v) { this.value = v; return true; }}; }
+
+          test('rapid taps consume one random draw; repeated completion counts once', () => {
+            let draws = 0;
+            const e = new CoinEngine(memory(), () => { draws++; return 'p'; }, () => 1000);
+            assert.equal(e.begin(), 'p');
+            for (let i = 0; i < 100; i++) assert.equal(e.begin(), null);
+            assert.equal(draws, 1);
+            assert.equal(e.finish(), 'p');
+            assert.equal(e.finish(), null);
+            assert.equal(e.state.p, 1);
+            assert.equal(e.state.recent.length, 1);
+          });
+
+          test('process death during animation restores the same result exactly once', () => {
+            const disk = memory();
+            const before = new CoinEngine(disk, () => 'i', () => 12345);
+            before.begin();
+            const after = new CoinEngine(disk, () => { throw Error('must not reroll'); });
+            assert.equal(after.state.i, 1);
+            assert.equal(after.state.last, 'i');
+            assert.equal(after.state.recent[0].at, 12345);
+            const again = new CoinEngine(disk, () => 'p');
+            assert.equal(again.state.i, 1);
+            assert.equal(again.finish(), null);
+          });
+
+          test('history is bounded without losing lifetime counters or altering a streak', () => {
+            const e = new CoinEngine(memory(), () => 'p', () => 1000);
+            for (let n = 0; n < 240; n++) { e.begin(); e.finish(); }
+            assert.equal(e.state.p, 240);
+            assert.equal(e.state.i, 0);
+            assert.equal(e.state.recent.length, 50);
+            assert.equal(e.state.recent[0].number, 240);
+            assert.equal(e.state.recent[49].number, 191);
+          });
+
+          test('clear cannot race a pending toss and preserves the haptic preference', () => {
+            const e = new CoinEngine(memory(), () => 'i', () => 2000);
+            e.setHaptics(false);
+            e.begin();
+            assert.equal(e.clear(), false);
+            e.finish();
+            assert.equal(e.clear(), true);
+            assert.equal(e.state.p + e.state.i, 0);
+            assert.equal(e.state.haptics, false);
+            assert.equal(e.state.last, null);
+          });
+
+          test('damaged storage and unavailable persistence do not crash a toss', () => {
+            const e = new CoinEngine(memory('{broken'), () => 'p', () => 2000);
+            e.storage.save = () => { throw Error('disk full'); };
+            assert.equal(e.begin(), 'p');
+            assert.equal(e.finish(), 'p');
+            assert.equal(e.state.p, 1);
+          });
+
+          test('invalid or missing entropy never silently turns into a chosen side', () => {
+            const e = new CoinEngine(memory(), () => 'bad');
+            assert.throws(() => e.begin());
+            assert.equal(e.state.pending, null);
+            assert.equal(e.state.p + e.state.i, 0);
+          });
+
+          test('changing haptics while a toss is pending does not reroll or lose it', () => {
+            const disk = memory();
+            const e = new CoinEngine(disk, () => 'i', () => 2500);
+            e.begin();
+            e.setHaptics(false);
+            const restored = new CoinEngine(disk, () => 'p');
+            assert.equal(restored.state.i, 1);
+            assert.equal(restored.state.haptics, false);
+          });
+          COIN_SOURCE_016_EOF
+          mkdir -p tests
+          cat > tests/ui.test.cjs <<'COIN_SOURCE_017_EOF'
+          'use strict';
+          const assert = require('node:assert/strict');
+          const path = require('node:path');
+          const fs = require('node:fs');
+          const {pathToFileURL} = require('node:url');
+          const {chromium} = require('playwright-core');
+
+          (async () => {
+            const browser = await chromium.launch({
+              executablePath: process.env.CHROME_BIN || '/usr/bin/google-chrome',
+              args: ['--no-sandbox', '--allow-file-access-from-files'],
+              headless: true
+            });
+            try {
+              const context = await browser.newContext({viewport:{width:390,height:800},deviceScaleFactor:2,isMobile:true,hasTouch:true});
+              const page = await context.newPage();
+              const errors = [];
+              const external = [];
+              page.on('pageerror', error => errors.push(String(error)));
+              page.on('request', request => { if (/^https?:/.test(request.url())) external.push(request.url()); });
+              await page.addInitScript(() => {
+                window.__choices = 0;
+                window.__haptics = 0;
+                window.CoinNative = {
+                  choose() { return ['p','i','i','p'][window.__choices++ % 4]; },
+                  load() { return localStorage.getItem('coin-ui-test') || ''; },
+                  save(value) { localStorage.setItem('coin-ui-test', value); return true; },
+                  haptic() { window.__haptics++; }
+                };
+              });
+              const url = pathToFileURL(path.resolve('app/src/main/assets/index.html')).href;
+              await page.goto(url);
+              await page.waitForFunction(() => !!window.coinApp);
+              await page.evaluate(() => Promise.all(Array.from(document.images, image => image.decode())));
+              fs.mkdirSync('ui-previews',{recursive:true});
+              await page.screenshot({path:'ui-previews/01-ready.png',fullPage:true});
+
+              await page.locator('#toss').click();
+              await page.evaluate(() => {
+                for (let n = 0; n < 30; n++) {
+                  document.getElementById('toss').click();
+                  document.getElementById('coin-button').click();
+                }
+              });
+              await page.waitForFunction(() => !document.getElementById('toss').disabled);
+              assert.equal(await page.locator('#result-name').textContent(),'PIDORAS');
+              assert.equal(await page.evaluate(() => window.__choices),1);
+              assert.equal(await page.locator('#total-count').textContent(),'001');
+              await page.screenshot({path:'ui-previews/02-pidoras.png',fullPage:true});
+
+              await page.locator('#coin-button').click();
+              await page.waitForFunction(() => !document.getElementById('toss').disabled);
+              assert.equal(await page.locator('#result-name').textContent(),'INTE PIDORAS');
+              assert.equal(await page.locator('#total-count').textContent(),'002');
+              await page.screenshot({path:'ui-previews/03-inte-pidoras.png',fullPage:true});
+
+              await page.locator('#toss').click();
+              await page.evaluate(() => window.coinApp.pause());
+              assert.equal(await page.locator('#total-count').textContent(),'003');
+              await page.reload();
+              await page.waitForFunction(() => !!window.coinApp);
+              assert.equal(await page.locator('#total-count').textContent(),'003');
+              assert.equal(await page.locator('#result-name').textContent(),'INTE PIDORAS');
+              assert.equal(await page.evaluate(() => window.__choices),0);
+
+              await page.locator('#haptics').click();
+              assert.equal(await page.locator('#haptics').getAttribute('aria-pressed'),'false');
+              await page.locator('#open-history').click();
+              assert.equal(await page.locator('#count-p').textContent(),'1');
+              assert.equal(await page.locator('#count-i').textContent(),'2');
+              await page.screenshot({path:'ui-previews/04-history.png',fullPage:true});
+              await page.locator('#clear-history').click();
+              await page.locator('#cancel-clear').click();
+              assert.equal(await page.locator('#history-list .history-row').count(),3);
+              await page.locator('#clear-history').click();
+              await page.locator('#confirm-clear').click();
+              await page.locator('#close-history').click();
+              assert.equal(await page.locator('#total-count').textContent(),'000');
+              assert.equal(await page.locator('#haptics').getAttribute('aria-pressed'),'false');
+
+              await page.emulateMedia({reducedMotion:'reduce'});
+              await page.locator('#toss').click();
+              await page.waitForFunction(() => !document.getElementById('toss').disabled);
+              assert.equal(await page.locator('#total-count').textContent(),'001');
+              for (const viewport of [{width:320,height:640},{width:360,height:720},{width:390,height:800},{width:430,height:900}]) {
+                await page.setViewportSize(viewport);
+                const bounds = await page.evaluate(() => {
+                  const button = document.getElementById('toss').getBoundingClientRect();
+                  return {width:document.documentElement.scrollWidth,viewport:innerWidth,bottom:button.bottom,height:innerHeight};
+                });
+                assert.ok(bounds.width <= bounds.viewport + 1, 'Horizontal overflow: ' + JSON.stringify(viewport));
+                assert.ok(bounds.bottom <= bounds.height + 1, 'Toss button outside viewport: ' + JSON.stringify(viewport) + ': ' + JSON.stringify(bounds));
+                await page.screenshot({path:'ui-previews/size-' + viewport.width + '.png',fullPage:true});
+              }
+              assert.deepEqual(errors,[],'JavaScript runtime errors');
+              assert.deepEqual(external,[],'The app must make no network requests');
+              console.log('UI PASS: both outcomes, rapid taps, pause/reload, haptics, history, reduced motion, 4 viewport sizes, zero network requests.');
+              await context.close();
+            } finally { await browser.close(); }
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+          COIN_SOURCE_017_EOF
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Restore the app signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: pidorascoin-debug-signing-v2-${{ runner.os }}-${{ github.repository_id }}
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          sdkmanager 'platforms;android-35' 'build-tools;34.0.0'
+
+      - name: Check JavaScript and toss recovery
+        shell: bash
+        run: |
+          node --check app/src/main/assets/engine.js
+          node --check app/src/main/assets/app.js
+          node --test tests/engine.test.cjs
+
+      - name: Check interface and save previews
+        shell: bash
+        run: |
+          npm install --no-audit --no-fund --no-save --package-lock=false playwright-core@1.51.1
+          node tests/ui.test.cjs
+
+      - name: Android Lint and APK build
+        shell: bash
+        run: |
+          gradle --no-daemon --console=plain :app:lintDebug :app:assembleDebug
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk PidorasCoin.apk
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose PidorasCoin.apk
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging PidorasCoin.apk
+
+      - name: Download your APK here
+        uses: actions/upload-artifact@v4
+        with:
+          name: PidorasCoin-APK
+          path: PidorasCoin.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Save interface previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PidorasCoin-UI-Previews
+          path: ui-previews/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Save Android Lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PidorasCoin-Lint
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+          retention-days: 14
